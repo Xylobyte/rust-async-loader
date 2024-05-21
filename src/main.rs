@@ -1,3 +1,4 @@
+use std::ops::ControlFlow::Break;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::thread;
@@ -35,6 +36,7 @@ impl Task {
 
 enum SchedulerMessage {
     NewTask(u32),
+    TaskFinished(u32),
     Stop,
 }
 
@@ -45,13 +47,13 @@ fn main() {
 
     // Scheduler thread
     let scheduler_tx = tx.clone();
-    let scheduler_tx_clone = scheduler_tx.clone();
     let scheduler_progress_tx = progress_tx.clone();
     let scheduler_handle = thread::spawn(move || {
         let mut task_id_counter = 0;
         let mut threads = vec![];
 
         loop {
+            //println!("Thread count: {}", threads.len());
             match rx.recv() {
                 Ok(SchedulerMessage::NewTask(task_id)) => {
                     if threads.len() < 10 {
@@ -60,12 +62,18 @@ fn main() {
                         task.start();
                         threads.push(task_id);
                         task_id_counter += 1;
+                        println!("Task {} started.", task_id);
                     } else {
                         println!("Maximum number of threads reached. Task {} will be delayed.", task_id);
                         // Add a delay to simulate distribution to other threads
                         thread::sleep(Duration::from_secs(1));
                         scheduler_tx.send(SchedulerMessage::NewTask(task_id)).unwrap();
                     }
+                },
+                Ok(SchedulerMessage::TaskFinished(task_id)) => {
+                    let index = threads.iter().position(|&x| x == task_id).unwrap();
+                    threads.remove(index);
+                    println!("Task {} finished !", task_id);
                 },
                 Ok(SchedulerMessage::Stop) => {
                     println!("Scheduler stopping...");
@@ -74,12 +82,6 @@ fn main() {
                 Err(_) => break,
             }
         }
-
-        // Wait for all threads to finish
-        for thread_id in threads {
-            println!("Waiting for task {} to finish...", thread_id);
-            scheduler_tx.send(SchedulerMessage::Stop).unwrap();
-        }
     });
 
     // Wait for the scheduler thread to start
@@ -87,28 +89,24 @@ fn main() {
 
     // Create 200 tasks
     for i in 1..=200 {
-        scheduler_tx_clone.send(SchedulerMessage::NewTask(i)).unwrap();
+        tx.send(SchedulerMessage::NewTask(i)).unwrap();
     }
 
     // Main thread polling the task's progress
     loop {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(500));
         if let Ok((task_id, progress)) = progress_rx.try_recv() {
             let progress = *progress.lock().unwrap();
             println!("Task {} progress: {}%", task_id, progress);
+            println!("Yolo");
             if progress >= 100 {
-                println!("Task {} finished.", task_id);
+                tx.send(SchedulerMessage::TaskFinished(task_id)).unwrap();
             }
-        }
-
-        // Check if all tasks finished
-        if progress_rx.try_recv().is_err() {
-            break;
         }
     }
 
     // Send a stop message to the scheduler
-    scheduler_tx_clone.send(SchedulerMessage::Stop).unwrap();
+    tx.send(SchedulerMessage::Stop).unwrap();
 
     // Wait for the scheduler thread to finish
     scheduler_handle.join().unwrap();
