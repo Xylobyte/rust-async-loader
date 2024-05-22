@@ -32,7 +32,6 @@ impl Task {
                 *prog = i;
                 progress_tx.send(SchedulerMessage::ProgressUpdate(task_id, i)).unwrap();
             }
-            println!("Task {} finished.", task_id);
             progress_tx.send(SchedulerMessage::TaskFinished(task_id)).unwrap();
         });
     }
@@ -41,44 +40,67 @@ impl Task {
 enum SchedulerMessage {
     NewTask(Sender<u32>),
     TaskFinished(u32),
-    GetProgress(u32, Sender<u8>),
+    GetProgress(u32, Sender<i8>),
     ProgressUpdate(u32, u8),
-    Stop,
+    Thanks,
+}
+
+fn start_task(
+    id: u32,
+    tasks_ids: &mut Vec<u32>,
+    scheduler_tx: &Sender<SchedulerMessage>,
+) {
+    tasks_ids.push(id);
+    let task = Task::new(id, scheduler_tx.clone());
+    task.start();
 }
 
 fn main() {
     let (scheduler_tx, scheduler_rx): (Sender<SchedulerMessage>, Receiver<SchedulerMessage>) = mpsc::channel();
-
     let scheduler_tx_cone = scheduler_tx.clone();
 
     let scheduler = thread::spawn(move || {
         let mut actual_id = 0;
+        let mut waiting_tasks: Vec<u32> = Vec::new();
         let mut tasks_ids: Vec<u32> = Vec::new();
         let mut progress_map: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
 
         loop {
             match scheduler_rx.recv() {
                 Ok(SchedulerMessage::NewTask(response_tx)) => {
-                    tasks_ids.push(actual_id);
-                    let task = Task::new(actual_id, scheduler_tx.clone());
-                    task.start();
-                    response_tx.send(actual_id).unwrap();
+                    if tasks_ids.len() < 10 {
+                        start_task(actual_id, &mut tasks_ids, &scheduler_tx);
+                        response_tx.send(actual_id).unwrap();
+                    } else {
+                        println!("--- Maximum number of threads reached. Task {} will be delayed.", actual_id);
+                        waiting_tasks.push(actual_id);
+                        response_tx.send(actual_id).unwrap();
+                    }
                     actual_id += 1;
                 }
                 Ok(SchedulerMessage::TaskFinished(id)) => {
                     tasks_ids.retain(|&x| x != id);
                     println!("--- Task {} finished.", id);
+                    if !waiting_tasks.is_empty() && tasks_ids.len() < 10 {
+                        let waiting_id = waiting_tasks.remove(0);
+                        start_task(waiting_id, &mut tasks_ids, &scheduler_tx);
+                        println!("--- Waiting task {} started.", waiting_id);
+                    }
                 }
                 Ok(SchedulerMessage::GetProgress(id, response_tx)) => {
                     if let Some(&progress) = progress_map.get(&id) {
-                        response_tx.send(progress).unwrap();
+                        if progress == 100 { progress_map.remove(&id); }
+                        response_tx.send(progress as i8).unwrap();
+                    } else {
+                        response_tx.send(-1).unwrap();
                     }
                 }
                 Ok(SchedulerMessage::ProgressUpdate(id, progress)) => {
                     progress_map.insert(id, progress);
                 }
-                Ok(SchedulerMessage::Stop) => {
+                Ok(SchedulerMessage::Thanks) => {
                     println!("--- All tasks finished.");
+                    println!("--- Merci au scheduler !");
                     break;
                 }
                 Err(_) => {
@@ -89,20 +111,44 @@ fn main() {
         }
     });
 
-    let (new_task_tx, new_task_rx) = mpsc::channel();
-    scheduler_tx_cone.send(SchedulerMessage::NewTask(new_task_tx)).unwrap();
-    let new_task_id = new_task_rx.recv().unwrap();
-    println!("New task created with ID: {}", new_task_id);
+    let mut ids: Vec<u32> = Vec::new();
 
-    thread::sleep(Duration::from_millis(500));
-
-    let (progress_query_tx, progress_query_rx) = mpsc::channel();
-    scheduler_tx_cone.send(SchedulerMessage::GetProgress(new_task_id, progress_query_tx)).unwrap();
-    match progress_query_rx.recv() {
-        Ok(progress) => println!("Progress of task {}: {}%", new_task_id, progress),
-        Err(_) => println!("Failed to get progress of task {}", new_task_id),
+    for _ in 1..=15 {
+        let (new_task_tx, new_task_rx) = mpsc::channel();
+        scheduler_tx_cone.send(SchedulerMessage::NewTask(new_task_tx)).unwrap();
+        let new_task_id = new_task_rx.recv().unwrap();
+        ids.push(new_task_id);
+        println!("New task created with ID: {}", new_task_id);
     }
 
-    scheduler_tx_cone.send(SchedulerMessage::Stop).unwrap();
+    println!("{:?}", ids);
+
+    loop {
+        thread::sleep(Duration::from_secs(1));
+
+        let mut completed_ids: Vec<u32> = Vec::new();
+
+        for &id in &ids {
+            let (progress_tx, progress_rx) = mpsc::channel();
+            scheduler_tx_cone.send(SchedulerMessage::GetProgress(id, progress_tx)).unwrap();
+            let progress = progress_rx.recv().unwrap();
+            if progress >= 0 { print!("Task {} progress: {}% / ", id, progress); }
+
+            if progress == 100 {
+                completed_ids.push(id);
+            }
+        }
+        println!();
+
+        ids.retain(|&x| !completed_ids.contains(&x));
+
+        if ids.is_empty() {
+            break;
+        }
+    }
+
+    println!("End of code !");
+
+    scheduler_tx_cone.send(SchedulerMessage::Thanks).unwrap();
     scheduler.join().unwrap();
 }
