@@ -57,7 +57,7 @@ fn start_task(
 
 fn main() {
     let (scheduler_tx, scheduler_rx): (Sender<SchedulerMessage>, Receiver<SchedulerMessage>) = mpsc::channel();
-    let scheduler_tx_cone = scheduler_tx.clone();
+    let scheduler_tx_clone = scheduler_tx.clone();
 
     let scheduler = thread::spawn(move || {
         let mut actual_id = 0;
@@ -91,8 +91,10 @@ fn main() {
                     if let Some(&progress) = progress_map.get(&id) {
                         if progress == 100 { progress_map.remove(&id); }
                         response_tx.send(progress as i8).unwrap();
-                    } else {
+                    } else if waiting_tasks.contains(&id) {
                         response_tx.send(-1).unwrap();
+                    } else {
+                        response_tx.send(-2).unwrap();
                     }
                 }
                 Ok(SchedulerMessage::ProgressUpdate(id, progress)) => {
@@ -115,7 +117,7 @@ fn main() {
 
     for _ in 1..=15 {
         let (new_task_tx, new_task_rx) = mpsc::channel();
-        scheduler_tx_cone.send(SchedulerMessage::NewTask(new_task_tx)).unwrap();
+        scheduler_tx_clone.send(SchedulerMessage::NewTask(new_task_tx)).unwrap();
         let new_task_id = new_task_rx.recv().unwrap();
         ids.push(new_task_id);
         println!("New task created with ID: {}", new_task_id);
@@ -130,11 +132,11 @@ fn main() {
 
         for &id in &ids {
             let (progress_tx, progress_rx) = mpsc::channel();
-            scheduler_tx_cone.send(SchedulerMessage::GetProgress(id, progress_tx)).unwrap();
+            scheduler_tx_clone.send(SchedulerMessage::GetProgress(id, progress_tx)).unwrap();
             let progress = progress_rx.recv().unwrap();
             if progress >= 0 { print!("Task {} progress: {}% / ", id, progress); }
 
-            if progress == 100 {
+            if progress == -2 {
                 completed_ids.push(id);
             }
         }
@@ -142,13 +144,11 @@ fn main() {
 
         ids.retain(|&x| !completed_ids.contains(&x));
 
-        if ids.is_empty() {
-            break;
-        }
+        if ids.is_empty() { break; }
     }
 
     println!("End of code !");
 
-    scheduler_tx_cone.send(SchedulerMessage::Thanks).unwrap();
+    scheduler_tx_clone.send(SchedulerMessage::Thanks).unwrap();
     scheduler.join().unwrap();
 }
